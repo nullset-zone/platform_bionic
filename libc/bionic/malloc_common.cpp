@@ -37,6 +37,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/mman.h>
 
 #include <platform/bionic/malloc.h>
 #include <private/ScopedPthreadMutexLocker.h>
@@ -429,6 +430,25 @@ void InitNativeAllocatorDispatch(libc_globals* globals) {
             hardened_impl = getenv("DISABLE_HARDENED_MALLOC") == nullptr;
         }
   }
+
+#if defined(__LP64__)
+  if (hardened_impl) {
+    // hardened_malloc reserves ~3.06 TiB for its slab region (64 GiB * 49 size classes).
+    // On 39-bit VA kernels (TASK_SIZE = 512 GiB, e.g. stock Laguna 6.6 GKI), that reservation
+    // fails with ENOMEM and aborts PID 1. Probe a 4 TiB virtual reservation first and fall back
+    // to Scudo when the kernel cannot satisfy >= 43-bit user virtual address space.
+    constexpr size_t kMinHardenedMallocVaProbe = 1ULL << 42;
+    int saved_errno = errno;
+    void* probe = mmap(nullptr, kMinHardenedMallocVaProbe, PROT_NONE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (probe == MAP_FAILED) {
+      errno = saved_errno;
+      hardened_impl = false;
+    } else {
+      munmap(probe, kMinHardenedMallocVaProbe);
+    }
+  }
+#endif
 
   const MallocDispatch* table = hardened_impl ?
     &__libc_malloc_default_dispatch :
